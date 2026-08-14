@@ -36,6 +36,73 @@ export const isSameStreamingSender = (
   b: OpenHandsEvent & { isFromPlanningAgent?: boolean },
 ): boolean => Boolean(a.isFromPlanningAgent) === Boolean(b.isFromPlanningAgent);
 
+const isFinalAgentTextEvent = (event: OpenHandsEvent): boolean =>
+  (isMessageEvent(event) && event.source === "agent") ||
+  (isActionEvent(event) && event.action.kind === "FinishAction");
+
+const finalEventHasReasoning = (event: OpenHandsEvent): boolean => {
+  if (isActionEvent(event)) {
+    return getReasoningContent(event).trim().length > 0;
+  }
+
+  if (isMessageEvent(event)) {
+    return (event.llm_message.reasoning_content?.trim().length ?? 0) > 0;
+  }
+
+  return false;
+};
+
+/**
+ * Compact REST history pages before they enter the global event store. Search
+ * endpoints return every streamed token as a persisted StreamingDeltaEvent,
+ * followed by the canonical MessageEvent/FinishAction for that same turn. On
+ * refresh or when opening an old chat, replaying those historical deltas causes
+ * hundreds of redundant store/UI updates even though only the final message is
+ * visible after reconciliation.
+ *
+ * WebSocket events still flow through `handleEventForUI` one-by-one, so live
+ * streaming remains smooth. This helper is only for already-persisted REST
+ * pages: it strips content deltas that are superseded by a later final agent
+ * text event in the same user turn, preserving reasoning-only deltas when the
+ * final event does not render that reasoning itself.
+ */
+export const compactRestHistoryEvents = (
+  events: OpenHandsEvent[],
+): OpenHandsEvent[] => {
+  let hasLaterFinalInTurn = false;
+  let laterFinalRendersReasoning = false;
+  const compacted: OpenHandsEvent[] = [];
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+
+    if (isMessageEvent(event) && event.source === "user") {
+      hasLaterFinalInTurn = false;
+      laterFinalRendersReasoning = false;
+      compacted.push(event);
+      continue;
+    }
+
+    if (isFinalAgentTextEvent(event)) {
+      hasLaterFinalInTurn = true;
+      laterFinalRendersReasoning = finalEventHasReasoning(event);
+      compacted.push(event);
+      continue;
+    }
+
+    if (hasLaterFinalInTurn && isStreamingDeltaEvent(event)) {
+      if (!laterFinalRendersReasoning && event.reasoning_content) {
+        compacted.push({ ...event, content: null });
+      }
+      continue;
+    }
+
+    compacted.push(event);
+  }
+
+  return compacted.reverse();
+};
+
 const findLastUserMessageIndex = (events: OpenHandsEvent[]): number => {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
