@@ -661,13 +661,47 @@ class AgentServerConversationService {
       stats?: RuntimeConversationInfo["stats"];
     };
 
-    // Fetch directly from the per-conversation runtime agent-server at conversationUrl.
-    const response = await new ConversationClient(
-      getAgentServerClientOptions({
-        conversationUrl,
-        sessionApiKey,
-      }),
-    ).getConversation<RawRuntime>(conversationId);
+    const active = getActiveBackend().backend;
+    let response: RawRuntime;
+    let runtimeConversationUrl = conversationUrl;
+    let runtimeSessionApiKey = sessionApiKey;
+
+    if (active.kind === "cloud") {
+      // Runtime sandbox hosts do not accept direct browser requests from a
+      // self-hosted Canvas origin. Route through the same-origin Cloud proxy,
+      // which forwards the per-conversation session key server-side.
+      if (!runtimeConversationUrl || !runtimeSessionApiKey) {
+        const [conversation] = await batchGetCloudConversations([
+          conversationId,
+        ]);
+        runtimeConversationUrl = conversation?.conversation_url?.trim() ?? null;
+        runtimeSessionApiKey = conversation?.session_api_key?.trim() ?? null;
+      }
+
+      if (!runtimeConversationUrl || !runtimeSessionApiKey) {
+        throw new Error(
+          "Conversation sandbox is still starting. Wait for it to finish, then try again.",
+        );
+      }
+
+      response = await callCloudProxy<RawRuntime>({
+        backend: active,
+        method: "GET",
+        hostOverride: buildHttpBaseUrl(runtimeConversationUrl),
+        path: `/api/conversations/${conversationId}`,
+        authMode: "session-api-key",
+        sessionApiKey: runtimeSessionApiKey,
+      });
+    } else {
+      // Local agent-server conversations can be requested directly.
+      response = await new ConversationClient(
+        getAgentServerClientOptions({
+          conversationUrl,
+          sessionApiKey,
+        }),
+      ).getConversation<RawRuntime>(conversationId);
+    }
+
     const data = requireDirectConversationInfo(response);
     const stats = isRecord(response) ? response.stats : null;
 

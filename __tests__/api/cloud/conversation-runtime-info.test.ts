@@ -70,7 +70,7 @@ describe("AgentServerConversationService.getRuntimeConversation", () => {
       vi.stubGlobal("fetch", fetchMock);
     });
 
-    it("targets the conversation runtime host directly and forwards X-Session-API-Key", async () => {
+    it("routes runtime reads through the same-origin Cloud proxy with the session key", async () => {
       // Arrange
       fetchMock.mockResolvedValue(mockJsonResponse(runtimeResponse));
       const conversationUrl =
@@ -84,14 +84,20 @@ describe("AgentServerConversationService.getRuntimeConversation", () => {
           "session-xyz",
         );
 
-      // Assert — fetch goes directly to the runtime host, not through
-      // /api/cloud-proxy (which was removed from the agent-server).
+      // Assert — direct browser requests to sandbox runtime hosts are rejected
+      // from a self-hosted Canvas origin, so Cloud must proxy this request.
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, init] = getFetchCall(fetchMock);
-      expect(url).toContain("abc123.runtime.all-hands.dev");
-      expect(url).toContain("/api/conversations/conv-abc");
-      expect(url).not.toMatch(/\/api\/cloud-proxy$/);
-      expect(init.headers).toMatchObject({
+      expect(url).toMatch(/\/api\/cloud-proxy$/);
+      const envelope = JSON.parse((init as { body: string }).body);
+      expect(envelope).toMatchObject({
+        host: "http://abc123.runtime.all-hands.dev",
+        method: "GET",
+        path: "/api/conversations/conv-abc",
+      });
+      expect(
+        (envelope as { headers: Record<string, string> }).headers,
+      ).toMatchObject({
         "X-Session-API-Key": "session-xyz",
       });
       expect(result.stats.usage_to_metrics.agent?.accumulated_cost).toBe(1.23);
