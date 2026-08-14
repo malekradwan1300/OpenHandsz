@@ -1,6 +1,7 @@
 import type { CloudRequestOptions } from "@openhands/typescript-client/clients";
 import type { Backend } from "../backend-registry/types";
 import { createCloudClientForRuntime, createCloudClient } from "./client";
+import { scheduleCloudRequest } from "./request-scheduler";
 
 export interface CloudProxyRequest {
   backend: Backend;
@@ -22,18 +23,30 @@ export async function callCloudProxy<TResponse = unknown>(
     ? createCloudClientForRuntime(req.backend)
     : createCloudClient(req.backend);
 
-  return client.request<TResponse>({
-    method: req.method,
-    path: req.path,
-    body: req.body,
-    headers: req.headers,
-    timeoutSeconds: req.timeoutSeconds,
-    hostOverride: req.hostOverride,
-    authMode:
-      req.authMode === undefined || req.authMode === "bearer"
-        ? "bearer"
-        : req.authMode,
-    sessionApiKey: req.sessionApiKey,
-    responseType: req.responseType,
-  });
+  const executeRequest = () =>
+    client.request<TResponse>({
+      method: req.method,
+      path: req.path,
+      body: req.body,
+      headers: req.headers,
+      timeoutSeconds: req.timeoutSeconds,
+      hostOverride: req.hostOverride,
+      authMode:
+        req.authMode === undefined || req.authMode === "bearer"
+          ? "bearer"
+          : req.authMode,
+      sessionApiKey: req.sessionApiKey,
+      responseType: req.responseType,
+    });
+
+  // Runtime calls use the per-conversation sandbox endpoint and are already
+  // isolated behind the same-origin Worker. Cloud API calls, however, share the
+  // provider's 10 requests/second limit with all startup and sidebar queries.
+  return req.hostOverride
+    ? executeRequest()
+    : scheduleCloudRequest(
+        req.backend,
+        { method: req.method, path: req.path },
+        executeRequest,
+      );
 }
