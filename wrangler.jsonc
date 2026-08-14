@@ -3,7 +3,7 @@
   "name": "openhands",
   "compatibility_date": "2026-08-14",
   "assets": {
-    "directory": "./build/client",
+    "directory": "./build",
     "not_found_handling": "single-page-application"
   }
 }
