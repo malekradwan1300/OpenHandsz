@@ -15,6 +15,12 @@ import { MOCK_DEFAULT_USER_SETTINGS } from "#/mocks/handlers";
 import { Settings } from "#/types/settings";
 import { WebClientConfig } from "#/api/option-service/option.types";
 
+const useActiveBackendMock = vi.hoisted(() => vi.fn());
+
+vi.mock("#/contexts/active-backend-context", () => ({
+  useActiveBackend: useActiveBackendMock,
+}));
+
 function buildSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     ...MOCK_DEFAULT_USER_SETTINGS,
@@ -81,6 +87,16 @@ function renderBanner() {
 describe("LlmNotConfiguredBanner", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    useActiveBackendMock.mockReturnValue({
+      backend: {
+        id: "test-local",
+        name: "Test Local",
+        host: "http://127.0.0.1:8000",
+        apiKey: "test-key",
+        kind: "local",
+      },
+      orgId: null,
+    });
     vi.spyOn(OptionService, "getConfig").mockResolvedValue(buildConfig());
     vi.spyOn(ProfilesService, "listProfiles").mockResolvedValue({
       profiles: [],
@@ -136,6 +152,44 @@ describe("LlmNotConfiguredBanner", () => {
         },
       ],
       active_profile: "active-profile",
+    });
+
+    // Act
+    renderBanner();
+    await screen.findByTestId("queries-settled");
+
+    // Assert
+    expect(
+      screen.queryByTestId("home-llm-not-configured-banner"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stays hidden for a Cloud backend when an active LLM profile has a saved API key", async () => {
+    // Arrange: Cloud previously ignored saved profile credentials and only
+    // inspected the legacy global settings flag, leaving this banner visible.
+    useActiveBackendMock.mockReturnValue({
+      backend: {
+        id: "test-cloud",
+        name: "Test Cloud",
+        host: "https://app.all-hands.dev",
+        apiKey: "cloud-access-key",
+        kind: "cloud",
+      },
+      orgId: "test-org",
+    });
+    vi.spyOn(SettingsService, "getSettings").mockResolvedValue(
+      buildSettings({ llm_api_key_set: false }),
+    );
+    vi.spyOn(ProfilesService, "listProfiles").mockResolvedValue({
+      profiles: [
+        {
+          name: "cloud-active-profile",
+          model: "openhands/claude-sonnet-4-5-20250929",
+          base_url: null,
+          api_key_set: true,
+        },
+      ],
+      active_profile: "cloud-active-profile",
     });
 
     // Act
