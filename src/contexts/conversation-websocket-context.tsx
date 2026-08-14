@@ -9,6 +9,7 @@ import React, {
   useRef,
 } from "react";
 import { ConversationClient } from "@openhands/typescript-client/clients";
+import type { OpenHandsEvent } from "#/types/agent-server/core";
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useWebSocket, WebSocketHookOptions } from "#/hooks/use-websocket";
@@ -39,6 +40,7 @@ import {
   isSwitchLLMObservationEvent,
   isCanvasUIActionEvent,
   isLaunchChildConversationActionEvent,
+  isStreamingDeltaEvent,
 } from "#/types/agent-server/type-guards";
 import { handleCanvasUIAction } from "#/services/canvas-ui";
 import { handleLaunchChildConversationAction } from "#/services/child-conversation-launch";
@@ -142,6 +144,58 @@ export function ConversationWebSocketProvider({
   const queryClient = useQueryClient();
   const addEvent = useEventStore((state) => state.addEvent);
   const addEvents = useEventStore((state) => state.addEvents);
+
+  // Token deltas can arrive many times within a single animation frame. Keep
+  // their arrival order, but apply them to the event store at most once per
+  // frame so a long streamed answer does not trigger one React update per token.
+  // Non-streaming events always flush first and remain synchronous: tool calls,
+  // errors and final messages therefore keep their established ordering.
+  const pendingStreamingEventsRef = useRef<OpenHandsEvent[]>([]);
+  const streamingFlushFrameRef = useRef<number | null>(null);
+  const flushStreamingEvents = useCallback(() => {
+    if (streamingFlushFrameRef.current !== null) {
+      cancelAnimationFrame(streamingFlushFrameRef.current);
+      streamingFlushFrameRef.current = null;
+    }
+
+    const pending = pendingStreamingEventsRef.current;
+    if (pending.length === 0) return;
+
+    pendingStreamingEventsRef.current = [];
+    addEvents(pending);
+  }, [addEvents]);
+  const queueEventForDisplay = useCallback(
+    (event: OpenHandsEvent) => {
+      if (!isStreamingDeltaEvent(event)) {
+        flushStreamingEvents();
+        addEvent(event);
+        return;
+      }
+
+      pendingStreamingEventsRef.current.push(event);
+      if (streamingFlushFrameRef.current !== null) return;
+
+      streamingFlushFrameRef.current = requestAnimationFrame(() => {
+        streamingFlushFrameRef.current = null;
+        flushStreamingEvents();
+      });
+    },
+    [addEvent, flushStreamingEvents],
+  );
+  useEffect(
+    () => () => {
+      // Do not carry a partial streamed tail into a different conversation.
+      // The authoritative history remains on the server and is restored when
+      // the conversation is revisited.
+      if (streamingFlushFrameRef.current !== null) {
+        cancelAnimationFrame(streamingFlushFrameRef.current);
+        streamingFlushFrameRef.current = null;
+      }
+      pendingStreamingEventsRef.current = [];
+    },
+    [conversationId],
+  );
+
   const clearEventsForConversation = useEventStore(
     (state) => state.clearEventsForConversation,
   );
@@ -524,7 +578,7 @@ export function ConversationWebSocketProvider({
           const switchLLMObservation = isSwitchLLMObservationEvent(event)
             ? event
             : null;
-          addEvent(event);
+          queueEventForDisplay(event);
           if (isDuplicateEvent) {
             return;
           }
@@ -699,7 +753,7 @@ export function ConversationWebSocketProvider({
       }
     },
     [
-      addEvent,
+      queueEventForDisplay,
       setErrorMessage,
       consumeMatchingPendingMessage,
       queryClient,
@@ -742,7 +796,7 @@ export function ConversationWebSocketProvider({
             ...event,
             isFromPlanningAgent: true,
           };
-          addEvent(eventWithPlanningFlag);
+          queueEventForDisplay(eventWithPlanningFlag);
           if (isDuplicateEvent) {
             return;
           }

@@ -16,7 +16,10 @@ import {
   setStoredConversationMetadata,
 } from "#/api/conversation-metadata-store";
 import type { AppConversation } from "#/api/conversation-service/agent-server-conversation-service.types";
-import type { MessageEvent } from "#/types/agent-server/core";
+import type {
+  MessageEvent,
+  StreamingDeltaEvent,
+} from "#/types/agent-server/core";
 
 type CapturedWebSocketOptions = {
   onMessage?: (event: { data: string }) => void;
@@ -130,6 +133,18 @@ describe("ConversationWebSocketProvider — conversation-scoped event store", ()
 
   // A successful model switch the agent performed on its own (via the
   // SwitchLLM tool), delivered over the main WebSocket.
+  const makeStreamingDelta = (
+    id: string,
+    content: string,
+  ): StreamingDeltaEvent => ({
+    id,
+    kind: "StreamingDeltaEvent",
+    timestamp: new Date().toISOString(),
+    source: "agent",
+    content,
+    reasoning_content: null,
+  });
+
   const makeAgentSwitchObservation = (profileName: string) => ({
     id: "evt-switch-1",
     timestamp: new Date().toISOString(),
@@ -145,6 +160,63 @@ describe("ConversationWebSocketProvider — conversation-scoped event store", ()
       reason: null,
       active_model: null,
     },
+  });
+
+  it("batches streamed deltas into one store update per animation frame", async () => {
+    let scheduledFrame: FrameRequestCallback | null = null;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        scheduledFrame = callback;
+        return 1;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ConversationWebSocketProvider
+          conversationId="conv-stream-batch"
+          conversationUrl="http://localhost/api"
+        >
+          <div />
+        </ConversationWebSocketProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(wsCapture.mainOnMessage).not.toBeNull());
+
+    let eventStoreUpdates = 0;
+    const unsubscribe = useEventStore.subscribe((state, previous) => {
+      if (state.events !== previous.events) eventStoreUpdates += 1;
+    });
+
+    act(() => {
+      for (const [id, content] of [
+        ["delta-1", "Hello"],
+        ["delta-2", ", "],
+        ["delta-3", "world"],
+      ]) {
+        wsCapture.mainOnMessage!({
+          data: JSON.stringify(makeStreamingDelta(id, content)),
+        });
+      }
+    });
+
+    expect(eventStoreUpdates).toBe(0);
+    expect(scheduledFrame).not.toBeNull();
+
+    act(() => {
+      scheduledFrame!(0);
+    });
+
+    expect(eventStoreUpdates).toBe(1);
+    const streamedMessage = useEventStore
+      .getState()
+      .uiEvents.find((event) => event.id === "delta-1") as StreamingDeltaEvent;
+    expect(streamedMessage.content).toBe("Hello, world");
+
+    unsubscribe();
+    vi.unstubAllGlobals();
   });
 
   it("stamps active_profile on a successful agent-triggered model switch so it survives reload", async () => {
