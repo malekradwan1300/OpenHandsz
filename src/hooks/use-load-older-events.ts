@@ -9,6 +9,7 @@ import {
 import { isTaskConversationId } from "#/utils/conversation-local-storage";
 import { seedModelSwitchesFromHistory } from "#/hooks/chat/record-model-switch-message";
 import type { OpenHandsEvent } from "#/types/agent-server/core";
+import { compactRestHistoryEvents } from "#/utils/handle-event-for-ui";
 
 const getEventTimestamp = (event: OpenHandsEvent): string | undefined =>
   "timestamp" in event ? event.timestamp : undefined;
@@ -139,7 +140,7 @@ export const useLoadOlderEvents = (
         );
       }
 
-      const older = [...page.items].reverse();
+      const older = compactRestHistoryEvents([...page.items].reverse());
       if (older.length > 0) {
         addEvents(older);
         // The initial preload only seeds switches from the tail page; a switch

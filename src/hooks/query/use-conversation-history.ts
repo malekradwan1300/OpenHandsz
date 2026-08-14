@@ -2,12 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import EventService from "#/api/event-service/event-service.api";
 import { useUserConversation } from "#/hooks/query/use-user-conversation";
 import type { OpenHandsEvent } from "#/types/agent-server/core";
+import { compactRestHistoryEvents } from "#/utils/handle-event-for-ui";
 
 /**
  * Number of events to load on the initial REST history fetch and on each
  * subsequent "scroll-up" page. The agent server caps `limit` at 100.
  */
-export const INITIAL_HISTORY_PAGE_SIZE = 50;
+export const INITIAL_HISTORY_PAGE_SIZE = 25;
 
 export interface ConversationHistoryPage {
   /** Events in chronological (oldest → newest) order. */
@@ -62,7 +63,7 @@ export const useConversationHistory = (conversationId?: string) => {
       }
 
       // Reverse so callers can append in chronological order.
-      const events = [...page.items].reverse();
+      const events = compactRestHistoryEvents([...page.items].reverse());
       return {
         events,
         hasMore:
