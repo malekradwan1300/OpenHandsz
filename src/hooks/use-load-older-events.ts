@@ -9,10 +9,16 @@ import {
 import { isTaskConversationId } from "#/utils/conversation-local-storage";
 import { seedModelSwitchesFromHistory } from "#/hooks/chat/record-model-switch-message";
 import type { OpenHandsEvent } from "#/types/agent-server/core";
-import { compactRestHistoryEvents } from "#/utils/handle-event-for-ui";
+import {
+  compactRestHistoryEvents,
+  countConversationMessages,
+} from "#/utils/handle-event-for-ui";
 
 const getEventTimestamp = (event: OpenHandsEvent): string | undefined =>
   "timestamp" in event ? event.timestamp : undefined;
+
+/** Number of user/AI messages visible after the initial background fill. */
+export const INITIAL_CONVERSATION_MESSAGE_COUNT = 10;
 
 interface UseLoadOlderEventsResult {
   /** True while a "load older" request is in flight. */
@@ -23,8 +29,11 @@ interface UseLoadOlderEventsResult {
    * returns a short page (i.e. it ran out of older events).
    */
   hasMore: boolean;
-  /** Trigger one more older-events page. Resolves when the page is merged. */
-  loadOlder: () => Promise<void>;
+  /**
+   * Load older pages until the requested number of logical user/AI messages is
+   * present. With no target, one logical batch is loaded for a manual scroll.
+   */
+  loadOlder: (targetMessageCount?: number) => Promise<void>;
 }
 
 /**
@@ -50,16 +59,19 @@ export const useLoadOlderEvents = (
   const { data: initialHistory, isFetched: isInitialHistoryFetched } =
     useConversationHistory(realConversationId ?? undefined);
   const addEvents = useEventStore((state) => state.addEvents);
+  const uiEvents = useEventStore((state) => state.uiEvents);
 
   const [isLoading, setIsLoading] = React.useState(false);
   const [hasMore, setHasMore] = React.useState(true);
   const isLoadingRef = React.useRef(false);
   const hasMoreRef = React.useRef(true);
   const nextPageIdRef = React.useRef<string | null>(null);
+  const lastRequestKeyRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     isLoadingRef.current = false;
     nextPageIdRef.current = null;
+    lastRequestKeyRef.current = null;
     setIsLoading(false);
 
     if (isTaskConversation) {
@@ -80,6 +92,7 @@ export const useLoadOlderEvents = (
   React.useEffect(() => {
     if (isTaskConversation || !initialHistory) return;
     nextPageIdRef.current = initialHistory.nextPageId;
+    lastRequestKeyRef.current = null;
   }, [initialHistory, isTaskConversation]);
 
   // Mirror the initial REST page: if the tail fetch already returned
@@ -99,93 +112,141 @@ export const useLoadOlderEvents = (
     realConversationId,
   ]);
 
-  const loadOlder = React.useCallback(async () => {
+  const loadOlder = React.useCallback(
+    async (targetMessageCount?: number) => {
+      if (
+        !conversationId ||
+        isTaskConversationId(conversationId) ||
+        isLoadingRef.current ||
+        !hasMoreRef.current
+      ) {
+        return;
+      }
+
+      // Cloud/local metadata (runtime URL, session key) isn't available on
+      // start-task placeholder routes and may still be loading right after
+      // redirect from `/conversations/task-{uuid}`.
+      if (!conversation) {
+        return;
+      }
+
+      const desiredMessageCount =
+        targetMessageCount ??
+        countConversationMessages(useEventStore.getState().uiEvents) +
+          INITIAL_CONVERSATION_MESSAGE_COUNT;
+
+      isLoadingRef.current = true;
+      setIsLoading(true);
+
+      try {
+        while (
+          hasMoreRef.current &&
+          countConversationMessages(useEventStore.getState().uiEvents) <
+            desiredMessageCount
+        ) {
+          const { events } = useEventStore.getState();
+          const oldest = events[0];
+
+          // No anchor yet — defer until the initial REST load has populated the
+          // store (avoids fetching twice with the same `TIMESTAMP_DESC` window).
+          if (!oldest) return;
+
+          const oldestTimestamp = getEventTimestamp(oldest);
+          if (!oldestTimestamp) {
+            // Nothing paginate-able — treat as exhausted rather than surfacing an
+            // error banner on brand-new conversations.
+            hasMoreRef.current = false;
+            setHasMore(false);
+            return;
+          }
+
+          const requestKey = nextPageIdRef.current
+            ? `page:${nextPageIdRef.current}`
+            : `timestamp:${oldestTimestamp}`;
+          if (lastRequestKeyRef.current === requestKey) {
+            hasMoreRef.current = false;
+            setHasMore(false);
+            break;
+          }
+          lastRequestKeyRef.current = requestKey;
+
+          const page = await EventService.searchEvents(
+            conversationId,
+            conversation?.conversation_url ?? null,
+            conversation?.session_api_key ?? null,
+            {
+              limit: INITIAL_HISTORY_PAGE_SIZE,
+              sortOrder: "TIMESTAMP_DESC",
+              ...(nextPageIdRef.current
+                ? { pageId: nextPageIdRef.current }
+                : { timestampLt: oldestTimestamp }),
+            },
+          );
+
+          if (!Array.isArray(page.items)) {
+            throw new Error(
+              "Invalid older-events response: expected page.items to be an array.",
+            );
+          }
+
+          const older = compactRestHistoryEvents([...page.items].reverse());
+          if (older.length > 0) {
+            addEvents(older);
+            // The initial preload only seeds switches from the tail page; a switch
+            // in an older page is hidden as a card but never seeded — silently lost.
+            // Reseed over the merged `uiEvents` (idempotent) so it still surfaces.
+            seedModelSwitchesFromHistory(
+              conversationId,
+              useEventStore.getState().uiEvents,
+            );
+          }
+          // A cursor is authoritative when supplied. Without a cursor, a short
+          // page is the compatibility signal that timestamp pagination is done.
+          nextPageIdRef.current = page.next_page_id ?? null;
+          const exhausted =
+            !nextPageIdRef.current &&
+            page.items.length < INITIAL_HISTORY_PAGE_SIZE;
+          if (exhausted) {
+            hasMoreRef.current = false;
+            setHasMore(false);
+          }
+        }
+      } finally {
+        isLoadingRef.current = false;
+        setIsLoading(false);
+      }
+    },
+    [
+      conversationId,
+      conversation,
+      conversation?.conversation_url,
+      conversation?.session_api_key,
+      addEvents,
+      initialHistory,
+    ],
+  );
+
+  // Fill the first visible window in the background. The initial REST query
+  // already renders its newest page; this effect only follows older cursors
+  // until ten logical user/AI messages are available, so opening a chat never
+  // waits for the whole transcript.
+  React.useEffect(() => {
     if (
-      !conversationId ||
-      isTaskConversationId(conversationId) ||
-      isLoadingRef.current ||
-      !hasMoreRef.current
+      isTaskConversation ||
+      !isInitialHistoryFetched ||
+      !initialHistory?.hasMore ||
+      countConversationMessages(uiEvents) >= INITIAL_CONVERSATION_MESSAGE_COUNT
     ) {
       return;
     }
 
-    // Cloud/local metadata (runtime URL, session key) isn't available on
-    // start-task placeholder routes and may still be loading right after
-    // redirect from `/conversations/task-{uuid}`.
-    if (!conversation) {
-      return;
-    }
-
-    const { events } = useEventStore.getState();
-    const oldest = events[0];
-
-    // No anchor yet — defer until the initial REST load has populated the
-    // store (avoids fetching twice with the same `TIMESTAMP_DESC` window).
-    if (!oldest) return;
-
-    const oldestTimestamp = getEventTimestamp(oldest);
-    if (!oldestTimestamp) {
-      // Nothing paginate-able — treat as exhausted rather than surfacing an
-      // error banner on brand-new conversations.
-      hasMoreRef.current = false;
-      setHasMore(false);
-      return;
-    }
-
-    isLoadingRef.current = true;
-    setIsLoading(true);
-    try {
-      const page = await EventService.searchEvents(
-        conversationId,
-        conversation?.conversation_url ?? null,
-        conversation?.session_api_key ?? null,
-        {
-          limit: INITIAL_HISTORY_PAGE_SIZE,
-          sortOrder: "TIMESTAMP_DESC",
-          ...(nextPageIdRef.current
-            ? { pageId: nextPageIdRef.current }
-            : { timestampLt: oldestTimestamp }),
-        },
-      );
-
-      if (!Array.isArray(page.items)) {
-        throw new Error(
-          "Invalid older-events response: expected page.items to be an array.",
-        );
-      }
-
-      const older = compactRestHistoryEvents([...page.items].reverse());
-      if (older.length > 0) {
-        addEvents(older);
-        // The initial preload only seeds switches from the tail page; a switch
-        // in an older page is hidden as a card but never seeded — silently lost.
-        // Reseed over the merged `uiEvents` (idempotent) so it still surfaces.
-        seedModelSwitchesFromHistory(
-          conversationId,
-          useEventStore.getState().uiEvents,
-        );
-      }
-      // Stop once the server signals there are no more pages, OR — for
-      // servers that don't fill in `next_page_id` for filtered queries —
-      // when we get back a short page.
-      nextPageIdRef.current = page.next_page_id ?? null;
-      const exhausted =
-        !nextPageIdRef.current || page.items.length < INITIAL_HISTORY_PAGE_SIZE;
-      if (exhausted) {
-        hasMoreRef.current = false;
-        setHasMore(false);
-      }
-    } finally {
-      isLoadingRef.current = false;
-      setIsLoading(false);
-    }
+    void loadOlder(INITIAL_CONVERSATION_MESSAGE_COUNT);
   }, [
-    conversationId,
-    conversation,
-    conversation?.conversation_url,
-    conversation?.session_api_key,
-    addEvents,
-    initialHistory,
+    isTaskConversation,
+    isInitialHistoryFetched,
+    initialHistory?.hasMore,
+    uiEvents.length,
+    loadOlder,
   ]);
 
   return { isLoading, hasMore, loadOlder };

@@ -55,6 +55,24 @@ function makeEvent(id: string, timestamp: string): OpenHandsEvent {
   return { id, timestamp } as unknown as OpenHandsEvent;
 }
 
+function makeMessage(
+  id: string,
+  timestamp: string,
+  source: "user" | "agent",
+): OpenHandsEvent {
+  return {
+    id,
+    timestamp,
+    source,
+    llm_message: {
+      role: source === "user" ? "user" : "assistant",
+      content: [{ type: "text", text: `${source}-${id}` }],
+    },
+    activated_microagents: [],
+    extended_content: [],
+  } as unknown as OpenHandsEvent;
+}
+
 function makePage(
   items: OpenHandsEvent[],
   nextPageId: string | null = null,
@@ -105,6 +123,53 @@ describe("useLoadOlderEvents", () => {
   afterEach(() => {
     queryClient.clear();
     vi.clearAllMocks();
+  });
+
+  it("loads pages until the requested number of logical messages is present", async () => {
+    act(() => {
+      useEventStore
+        .getState()
+        .addEvents([
+          makeMessage("tail-user", "2024-06-01T00:00:00Z", "user"),
+          makeMessage("tail-agent", "2024-06-01T00:01:00Z", "agent"),
+        ]);
+    });
+    vi.mocked(useConversationHistory).mockReturnValue({
+      data: { events: [], hasMore: true, nextPageId: "page-1" },
+      isFetched: true,
+    } as unknown as ReturnType<typeof useConversationHistory>);
+    const firstPage = [
+      makeMessage("p1-user-1", "2024-05-01T00:00:00Z", "user"),
+      makeMessage("p1-agent-1", "2024-05-01T00:01:00Z", "agent"),
+      makeMessage("p1-user-2", "2024-05-01T00:02:00Z", "user"),
+      makeMessage("p1-agent-2", "2024-05-01T00:03:00Z", "agent"),
+    ];
+    const secondPage = [
+      makeMessage("p2-user-1", "2024-04-01T00:00:00Z", "user"),
+      makeMessage("p2-agent-1", "2024-04-01T00:01:00Z", "agent"),
+      makeMessage("p2-user-2", "2024-04-01T00:02:00Z", "user"),
+      makeMessage("p2-agent-2", "2024-04-01T00:03:00Z", "agent"),
+    ];
+    const spy = vi
+      .spyOn(EventService, "searchEvents")
+      .mockResolvedValueOnce(makePage([...firstPage].reverse(), "page-2"))
+      .mockResolvedValueOnce(makePage([...secondPage].reverse(), "page-3"));
+
+    const { result } = renderHook(() => useLoadOlderEvents("conv-1"), {
+      wrapper,
+    });
+    await act(async () => {
+      await result.current.loadOlder(10);
+    });
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(
+      useEventStore
+        .getState()
+        .uiEvents.filter(
+          (event) => event.source === "user" || event.source === "agent",
+        ),
+    ).toHaveLength(10);
   });
 
   it("does nothing while the store has no anchor (REST hasn't seeded yet)", async () => {
@@ -284,10 +349,11 @@ describe("useLoadOlderEvents", () => {
     const fullPage: OpenHandsEvent[] = Array.from(
       { length: INITIAL_HISTORY_PAGE_SIZE },
       (_, i) =>
-        makeEvent(
+        makeMessage(
           `evt-page1-${i}`,
           // Descending timestamps within the page so newest-first works.
           new Date(2024, 4, 30 - i).toISOString(),
+          i % 2 === 0 ? "user" : "agent",
         ),
     );
 

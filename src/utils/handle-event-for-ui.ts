@@ -103,6 +103,55 @@ export const compactRestHistoryEvents = (
   return compacted.reverse();
 };
 
+/**
+ * Counts conversation messages rather than persisted events. Cloud persists
+ * every streamed token as a StreamingDeltaEvent, so a consecutive delta run is
+ * one provisional agent message until its canonical MessageEvent arrives.
+ * Tool/action cards are intentionally excluded from this count because the
+ * history window is defined in user/AI messages.
+ */
+export const countConversationMessages = (events: OpenHandsEvent[]): number => {
+  let count = 0;
+  let activeStreamingSender: "agent" | "planning" | null = null;
+
+  for (const event of events) {
+    if (isMessageEvent(event) && event.source === "user") {
+      count += 1;
+      activeStreamingSender = null;
+      continue;
+    }
+
+    if (isMessageEvent(event) && event.source === "agent") {
+      // A canonical assistant message normally follows its streamed deltas.
+      // Treat that pair as one logical AI message.
+      if (activeStreamingSender !== "agent") {
+        count += 1;
+      }
+      activeStreamingSender = null;
+      continue;
+    }
+
+    if (
+      isStreamingDeltaEvent(event) &&
+      (event.content || event.reasoning_content)
+    ) {
+      const sender =
+        "isFromPlanningAgent" in event && Boolean(event.isFromPlanningAgent)
+          ? "planning"
+          : "agent";
+      if (activeStreamingSender !== sender) {
+        count += 1;
+        activeStreamingSender = sender;
+      }
+      continue;
+    }
+
+    activeStreamingSender = null;
+  }
+
+  return count;
+};
+
 const findLastUserMessageIndex = (events: OpenHandsEvent[]): number => {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];

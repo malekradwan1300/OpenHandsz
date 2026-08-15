@@ -8,7 +8,10 @@ import {
 } from "#/types/agent-server/core";
 import { ACPToolCallEvent } from "#/types/agent-server/core/events/acp-tool-call-event";
 import { StreamingDeltaEvent } from "#/types/agent-server/core/events/streaming-delta-event";
-import { handleEventForUI } from "#/utils/handle-event-for-ui";
+import {
+  countConversationMessages,
+  handleEventForUI,
+} from "#/utils/handle-event-for-ui";
 
 describe("handleEventForUI", () => {
   const mockObservationEvent: ObservationEvent = {
@@ -125,6 +128,35 @@ describe("handleEventForUI", () => {
     source: "agent",
     content,
     reasoning_content: null,
+  });
+
+  it("counts a streamed assistant response as one logical message", () => {
+    expect(
+      countConversationMessages([
+        mockMessageEvent,
+        makeStreamingDelta("delta-1", "Hel"),
+        makeStreamingDelta("delta-2", "lo"),
+        makeStreamingDelta("delta-3", "!"),
+        mockAgentMessageEvent,
+      ]),
+    ).toBe(2);
+  });
+
+  it("counts separate user and assistant turns independently", () => {
+    expect(
+      countConversationMessages([mockMessageEvent, mockAgentMessageEvent]),
+    ).toBe(2);
+  });
+
+  it("ignores tool events when sizing the message window", () => {
+    expect(
+      countConversationMessages([
+        mockMessageEvent,
+        mockActionEvent,
+        mockObservationEvent,
+        mockAgentMessageEvent,
+      ]),
+    ).toBe(2);
   });
 
   it("should add non-observation events to the end of uiEvents", () => {
