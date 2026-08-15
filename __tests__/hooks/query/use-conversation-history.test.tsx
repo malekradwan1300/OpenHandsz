@@ -201,7 +201,6 @@ describe("useConversationHistory", () => {
       "Invalid conversation history response: expected page.items to be an array.",
     );
   });
-
 });
 
 describe("useConversationHistory cache key stability", () => {
@@ -290,7 +289,7 @@ describe("useConversationHistory cache key stability", () => {
     // The hook now consistently uses searchEvents for all conversations.
   });
 
-  it("refetches the tail on remount (returning to a conversation) so events produced while away load in one batched page", async () => {
+  it("reuses the fresh cached tail on a quick remount without a duplicate search", async () => {
     const v1Spy = vi.spyOn(EventService, "searchEvents");
     v1Spy.mockResolvedValue(makePage([makeEvent()]));
 
@@ -309,16 +308,16 @@ describe("useConversationHistory cache key stability", () => {
     );
     await waitFor(() => expect(v1Spy).toHaveBeenCalledTimes(1));
 
-    // Leaving keeps the page cached (gcTime), so returning renders instantly —
-    // but it MUST refetch the tail so events the agent produced while we were
-    // away (e.g. an active /goal loop emitting turns on another conversation)
-    // arrive in this one batched REST page instead of being back-filled one at
-    // a time over the WebSocket `since` replay.
+    // Leaving keeps the page cached (gcTime), so a quick return renders the
+    // latest tail immediately without another burst of Cloud API requests.
+    // The WebSocket remains responsible for catching up live events, and a
+    // stale cache is refreshed in the background after the short stale window.
     unmount();
     renderHook(() => useConversationHistory("conv-remount"), {
       wrapper: localWrapper,
     });
-    await waitFor(() => expect(v1Spy).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(v1Spy).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the page cached (no window-focus refetch) so the gated WebSocket doesn't churn", async () => {
@@ -348,11 +347,11 @@ describe("useConversationHistory cache key stability", () => {
     });
     expect(queries).toHaveLength(1);
     const options = queries[0].options as Record<string, unknown>;
-    // Cached data renders instantly on return (gcTime), the tail refetches on
-    // mount, and window focus is a no-op — the socket connection is gated on
-    // this query settling, so a focus refetch would drop and reconnect it.
+    // Cached data renders instantly on return (gcTime), fresh data is reused
+    // for a short stale window, and window focus is a no-op.
     expect(options.gcTime).toBeGreaterThanOrEqual(30 * 60 * 1000);
-    expect(options.refetchOnMount).toBe("always");
+    expect(options.staleTime).toBe(15 * 1000);
+    expect(options.refetchOnMount).toBe(true);
     expect(options.refetchOnWindowFocus).toBe(false);
   });
 

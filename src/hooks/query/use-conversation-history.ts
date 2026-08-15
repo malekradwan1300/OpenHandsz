@@ -5,10 +5,12 @@ import type { OpenHandsEvent } from "#/types/agent-server/core";
 import { compactRestHistoryEvents } from "#/utils/handle-event-for-ui";
 
 /**
- * Number of events to load on the initial REST history fetch and on each
- * subsequent "scroll-up" page. The agent server caps `limit` at 100.
+ * Number of persisted events to load on the initial REST history fetch and on
+ * each subsequent "scroll-up" page. Keep this small because the Cloud API
+ * stores streamed token deltas as individual events; the UI compacts them
+ * before rendering. The agent server caps `limit` at 100.
  */
-export const INITIAL_HISTORY_PAGE_SIZE = 25;
+export const INITIAL_HISTORY_PAGE_SIZE = 10;
 
 export interface ConversationHistoryPage {
   /** Events in chronological (oldest → newest) order. */
@@ -21,8 +23,9 @@ export interface ConversationHistoryPage {
 
 /**
  * Loads the most recent conversation events via REST. The server query is
- * sorted `TIMESTAMP_DESC` so we can request just the tail of the conversation;
- * we reverse the result to chronological order before handing it to callers.
+ * sorted `TIMESTAMP_DESC`, so the first response is a small tail window and
+ * can be rendered without loading the full transcript. We reverse the result
+ * to chronological order before handing it to callers.
  *
  * Older events are loaded on demand by `useLoadOlderEvents` once the user
  * scrolls up. The WebSocket then connects with `resend_mode='since'` using
@@ -71,22 +74,14 @@ export const useConversationHistory = (conversationId?: string) => {
         nextPageId: page.next_page_id ?? null,
       };
     },
-    // Keep the cached page so returning to a conversation renders the
-    // last-known discussion instantly (no skeleton). But refetch the tail on
-    // mount so events produced while we were away — e.g. an active /goal loop
-    // that keeps emitting user + agent turns while we're on another
-    // conversation — arrive in one batched REST page instead of being
-    // back-filled one event at a time over the WebSocket `since` replay. The
-    // cached tail's newest timestamp never advances on its own, so without this
-    // refetch every return replays the entire post-first-load history over the
-    // socket (and it gets worse the longer the goal has been running).
-    //
-    // refetchOnWindowFocus is disabled because the WebSocket connection is
-    // gated on this query settling (see conversation-websocket-context.tsx); a
-    // focus-driven refetch would otherwise needlessly drop and reconnect it.
-    staleTime: 0,
-    gcTime: 30 * 60 * 1000, // 30 minutes — keep cached data to render instantly on return
-    refetchOnMount: "always",
+    // Keep the cached tail so returning to a conversation renders immediately.
+    // A short stale window avoids firing another search request for every
+    // route remount, while the WebSocket still catches up events produced while
+    // the user was away. Once stale, React Query refreshes the tail in the
+    // background; the cached page remains the first render.
+    staleTime: 15 * 1000,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
   });
 };

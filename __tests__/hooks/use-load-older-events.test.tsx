@@ -16,13 +16,18 @@ import type { EventSearchPage } from "#/api/event-service/event-service.types";
 
 vi.mock("#/api/event-service/event-service.api");
 vi.mock("#/hooks/query/use-user-conversation");
-vi.mock("#/hooks/query/use-conversation-history", () => ({
-  INITIAL_HISTORY_PAGE_SIZE: 50,
-  useConversationHistory: vi.fn(() => ({
-    data: undefined,
-    isFetched: false,
-  })),
-}));
+vi.mock("#/hooks/query/use-conversation-history", async () => {
+  const actual = await vi.importActual<
+    typeof import("#/hooks/query/use-conversation-history")
+  >("#/hooks/query/use-conversation-history");
+  return {
+    ...actual,
+    useConversationHistory: vi.fn(() => ({
+      data: undefined,
+      isFetched: false,
+    })),
+  };
+});
 
 function makeConversation(): Conversation {
   // Cast: `useUserConversation` actually returns an `AppConversation` whose
@@ -163,6 +168,50 @@ describe("useLoadOlderEvents", () => {
     });
   });
 
+  it("uses the initial Cloud cursor for the next older page", async () => {
+    act(() => {
+      useEventStore
+        .getState()
+        .addEvent(makeEvent("evt-recent", "2024-06-01T00:00:00Z"));
+    });
+    vi.mocked(useConversationHistory).mockReturnValue({
+      data: { events: [], hasMore: true, nextPageId: "25" },
+      isFetched: true,
+      isPending: false,
+      isLoading: false,
+      isError: false,
+      error: null,
+      isFetching: false,
+      isSuccess: true,
+      status: "success",
+    } as unknown as ReturnType<typeof useConversationHistory>);
+
+    const spy = vi
+      .spyOn(EventService, "searchEvents")
+      .mockResolvedValue(
+        makePage([makeEvent("evt-old", "2024-05-01T00:00:00Z")], null),
+      );
+
+    const { result } = renderHook(() => useLoadOlderEvents("conv-1"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(spy).toHaveBeenCalledWith(
+      "conv-1",
+      "https://example.com/conv-test",
+      "secret",
+      {
+        limit: INITIAL_HISTORY_PAGE_SIZE,
+        sortOrder: "TIMESTAMP_DESC",
+        pageId: "25",
+      },
+    );
+  });
+
   it("seeds inline model-switch messages for switches in a paginated older page", async () => {
     // A successful SwitchLLMObservation is hidden as a card and surfaced via an
     // inline "Switched to" message seeded from history. The initial preload only
@@ -291,7 +340,9 @@ describe("useLoadOlderEvents", () => {
     expect(result.current.isLoading).toBe(true);
 
     await act(async () => {
-      resolvePage(makePage([makeEvent("evt-older", "2024-05-01T00:00:00Z")], null));
+      resolvePage(
+        makePage([makeEvent("evt-older", "2024-05-01T00:00:00Z")], null),
+      );
       await Promise.all([firstLoad, secondLoad]);
     });
 

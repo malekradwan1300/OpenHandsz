@@ -312,7 +312,6 @@ export function ConversationWebSocketProvider({
   const {
     data: preloadedHistory,
     isPending: isPreloadingHistory,
-    isFetching: isFetchingHistory,
     isError: isPreloadHistoryError,
   } = useConversationHistory(conversationId);
 
@@ -389,48 +388,39 @@ export function ConversationWebSocketProvider({
   ]);
 
   /**
-   * Timestamp of the latest event we already have from REST. Used as
+   * Timestamp of the latest event already present in the REST cache. Used as
    * `after_timestamp` when opening the WebSocket so the server only resends
-   * events strictly after this point. `null` until the REST query settles
-   * (we hold the WS connection open until then to avoid an `all` resend).
+   * events strictly after this point. On a return visit the cached tail is a
+   * valid anchor, so the socket can connect while a background REST refetch
+   * refreshes that tail.
    */
   const initialAfterTimestamp = useMemo<string | null>(() => {
-    // Wait for the history query to settle — including the refetch fired when
-    // returning to a conversation — so we anchor `since` to the freshest event
-    // we have rather than a stale cached tail.
-    if (isFetchingHistory) return null;
+    if (isPreloadingHistory) return null;
     const events = preloadedHistory?.events ?? [];
     const latest = events[events.length - 1];
     if (!latest || !("timestamp" in latest) || !latest.timestamp) return null;
     return latest.timestamp;
-  }, [preloadedHistory, isFetchingHistory]);
+  }, [preloadedHistory, isPreloadingHistory]);
 
   // Build WebSocket URL from props.
   //
-  // We deliberately wait for the history fetch to settle before opening the
-  // socket so the WS subscription can use `resend_mode='since'` with a
-  // meaningful `after_timestamp`. This gate is on `isFetching`, not just the
-  // first-load `isPending`, so the refetch fired when returning to a
-  // conversation also completes first: the socket bakes `after_timestamp` into
-  // its URL at connect time and will NOT re-subscribe when the value changes
-  // later (see use-websocket — options live in a ref, reconnect keys on the URL
-  // only). Connecting mid-fetch would therefore pin `since` to the stale cached
-  // tail and replay the entire backlog over the socket. Without any gate the WS
-  // would instead fall back to `resend_mode='all'`. If the REST query errored we
-  // fall through and connect with `resend_mode='all'` so the user still sees
-  // live events.
+  // On a first visit, wait for the initial tail page so the WS can use
+  // `resend_mode='since'` instead of replaying the whole conversation. On a
+  // return visit, cached history is already available, so connect immediately
+  // and let the REST tail refresh in parallel. The cached timestamp is a valid
+  // anchor and the event store deduplicates any overlap.
   const wsUrl = useMemo(() => {
     if (!conversationId || !conversationUrl) {
       return null;
     }
-    if (isFetchingHistory && !isPreloadHistoryError) {
+    if (isPreloadingHistory && !isPreloadHistoryError) {
       return null;
     }
     return buildWebSocketUrl(conversationId, conversationUrl);
   }, [
     conversationId,
     conversationUrl,
-    isFetchingHistory,
+    isPreloadingHistory,
     isPreloadHistoryError,
   ]);
 

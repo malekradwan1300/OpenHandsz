@@ -529,7 +529,7 @@ export function ChatInterface() {
           {/*
            * Render whenever there's anything to display. Previously this
            * was gated on `conversationUserEventsExist`, but with the lazy
-           * "50 most recent" REST fetch the initial window may not include
+           * "10 most recent" REST fetch the initial window may not include
            * any `source: "user"` events (long agent runs between user
            * turns). That left the chat blank, leaving the user nothing to
            * scroll — which is why "scroll up to load older" appeared

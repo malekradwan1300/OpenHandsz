@@ -55,9 +55,11 @@ export const useLoadOlderEvents = (
   const [hasMore, setHasMore] = React.useState(true);
   const isLoadingRef = React.useRef(false);
   const hasMoreRef = React.useRef(true);
+  const nextPageIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     isLoadingRef.current = false;
+    nextPageIdRef.current = null;
     setIsLoading(false);
 
     if (isTaskConversation) {
@@ -69,6 +71,16 @@ export const useLoadOlderEvents = (
     hasMoreRef.current = true;
     setHasMore(true);
   }, [conversationId, isTaskConversation]);
+
+  // Prefer the server cursor returned by the initial tail page. Cloud uses an
+  // opaque page id (for example "25") for its event stream; using it avoids
+  // timestamp parsing/filtering on the App API and prevents fetching the same
+  // tail repeatedly. The timestamp path remains a compatibility fallback for
+  // older/local servers that do not return a cursor.
+  React.useEffect(() => {
+    if (isTaskConversation || !initialHistory) return;
+    nextPageIdRef.current = initialHistory.nextPageId;
+  }, [initialHistory, isTaskConversation]);
 
   // Mirror the initial REST page: if the tail fetch already returned
   // everything, don't auto-trigger an older-events request on short chats.
@@ -130,7 +142,9 @@ export const useLoadOlderEvents = (
         {
           limit: INITIAL_HISTORY_PAGE_SIZE,
           sortOrder: "TIMESTAMP_DESC",
-          timestampLt: oldestTimestamp,
+          ...(nextPageIdRef.current
+            ? { pageId: nextPageIdRef.current }
+            : { timestampLt: oldestTimestamp }),
         },
       );
 
@@ -154,8 +168,9 @@ export const useLoadOlderEvents = (
       // Stop once the server signals there are no more pages, OR — for
       // servers that don't fill in `next_page_id` for filtered queries —
       // when we get back a short page.
+      nextPageIdRef.current = page.next_page_id ?? null;
       const exhausted =
-        !page.next_page_id || page.items.length < INITIAL_HISTORY_PAGE_SIZE;
+        !nextPageIdRef.current || page.items.length < INITIAL_HISTORY_PAGE_SIZE;
       if (exhausted) {
         hasMoreRef.current = false;
         setHasMore(false);
@@ -170,6 +185,7 @@ export const useLoadOlderEvents = (
     conversation?.conversation_url,
     conversation?.session_api_key,
     addEvents,
+    initialHistory,
   ]);
 
   return { isLoading, hasMore, loadOlder };
