@@ -81,7 +81,7 @@ export const useConversationHistory = (conversationId?: string) => {
     // background; the cached page remains the first render.
     staleTime: 15 * 1000,
     gcTime: 30 * 60 * 1000,
-    refetchOnMount: true,
+    refetchOnMount: false,
     refetchOnWindowFocus: false,
   });
 };

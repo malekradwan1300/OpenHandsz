@@ -415,25 +415,11 @@ export function ChatInterface() {
     scrollDomToBottom,
   ]);
 
-  // Auto-load older events when the chat content doesn't overflow the
-  // scroll area (no scrollbar to drag, no wheel events past 0). We
-  // re-run only when the rendered list grows or `hasMore` flips, NOT
-  // when `maybeLoadOlder` re-creates: the underlying hook's `loadOlder`
-  // ref changes whenever its internal `isLoading` toggles, so depending
-  // on `maybeLoadOlder` would re-fire the effect on every failed page
-  // and tight-loop until the server recovered. Driving off
-  // `renderableEvents.length` instead means a successful page (events
-  // grow) chains the next request, while a failed page (events
-  // unchanged) waits for the user to retry.
-  const maybeLoadOlderRef = React.useRef(maybeLoadOlder);
-  React.useEffect(() => {
-    maybeLoadOlderRef.current = maybeLoadOlder;
-  });
-  React.useEffect(() => {
-    const target = scrollRef.current;
-    if (!target) return;
-    maybeLoadOlderRef.current(target);
-  }, [renderableEvents.length, hasMoreOlderEvents]);
+  // Do not auto-pagination on mount when the chat content is shorter than
+  // the viewport. A short conversation has no scrollbar, and chaining a
+  // request every time a page is merged can produce an unbounded burst of
+  // `events/search` calls. The scroll and wheel handlers above still allow the
+  // user to explicitly request older history from the top.
 
   // Create a ScrollProvider with the scroll hook values
   const scrollProviderValue = {

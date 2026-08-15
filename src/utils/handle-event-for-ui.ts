@@ -516,6 +516,15 @@ export const handleEventForUI = (
 ): OpenHandsEvent[] => {
   const newUiEvents = [...uiEvents];
 
+  if (
+    (isMessageEvent(event) && event.source === "agent") ||
+    (isActionEvent(event) && event.action.kind === "FinishAction")
+  ) {
+    if (hasEquivalentFinalAgentMessage(event, newUiEvents)) {
+      return newUiEvents;
+    }
+  }
+
   if (isStreamingDeltaEvent(event)) {
     if (event.content === null && event.reasoning_content === null) {
       return newUiEvents;

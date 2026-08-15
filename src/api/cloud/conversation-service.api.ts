@@ -47,6 +47,20 @@ function overlayStoredRepoSelection(
   };
 }
 
+const CLOUD_CONVERSATION_SEARCH_CACHE_TTL_MS = 10_000;
+type CloudConversationSearchCacheEntry = {
+  expiresAt: number;
+  value: AppConversationPage;
+};
+const cloudConversationSearchCache = new Map<
+  string,
+  CloudConversationSearchCacheEntry
+>();
+const cloudConversationSearchInFlight = new Map<
+  string,
+  Promise<AppConversationPage>
+>();
+
 function getActiveCloudBackend(): Backend {
   const active = getActiveBackend().backend;
   if (active.kind !== "cloud") {
@@ -133,31 +147,62 @@ export async function searchCloudConversations(
   pageId?: string,
 ): Promise<AppConversationPage> {
   const backend = getActiveCloudBackend();
-  const aggregated = await searchCloudConversationsThroughWorker(
-    backend,
-    limit,
-    pageId,
-  );
-  const data =
-    aggregated ??
-    (await (async () => {
-      const params = new URLSearchParams();
-      params.set("limit", String(limit));
-      if (pageId) params.set("page_id", pageId);
-      params.set("sort_order", "UPDATED_AT_DESC");
-      return callCloudProxy<CloudConversationAggregateResponse>({
-        backend,
-        method: "GET",
-        path: `/api/v1/app-conversations/search?${params.toString()}`,
-      });
-    })());
+  const cacheKey = `${backend.id}\u0000${getActiveBackend().orgId ?? ""}\u0000${limit}\u0000${pageId ?? ""}`;
+  const now = Date.now();
+  const cached = cloudConversationSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.value;
+  if (cached) cloudConversationSearchCache.delete(cacheKey);
 
-  return {
-    items: (data?.items ?? []).map(
-      (item) => overlayStoredRepoSelection(item) as AppConversation,
-    ),
-    next_page_id: data?.next_page_id ?? null,
-  };
+  const pending = cloudConversationSearchInFlight.get(cacheKey);
+  if (pending) return pending;
+
+  const request = (async (): Promise<AppConversationPage> => {
+    const aggregated = await searchCloudConversationsThroughWorker(
+      backend,
+      limit,
+      pageId,
+    );
+    const data =
+      aggregated ??
+      (await (async () => {
+        const params = new URLSearchParams();
+        params.set("limit", String(limit));
+        if (pageId) params.set("page_id", pageId);
+        params.set("sort_order", "UPDATED_AT_DESC");
+        return callCloudProxy<CloudConversationAggregateResponse>({
+          backend,
+          method: "GET",
+          path: `/api/v1/app-conversations/search?${params.toString()}`,
+        });
+      })());
+
+    const value = {
+      items: (data?.items ?? []).map(
+        (item) => overlayStoredRepoSelection(item) as AppConversation,
+      ),
+      next_page_id: data?.next_page_id ?? null,
+    };
+    cloudConversationSearchCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + CLOUD_CONVERSATION_SEARCH_CACHE_TTL_MS,
+    });
+    return value;
+  })();
+
+  cloudConversationSearchInFlight.set(cacheKey, request);
+  void request.then(
+    () => {
+      if (cloudConversationSearchInFlight.get(cacheKey) === request) {
+        cloudConversationSearchInFlight.delete(cacheKey);
+      }
+    },
+    () => {
+      if (cloudConversationSearchInFlight.get(cacheKey) === request) {
+        cloudConversationSearchInFlight.delete(cacheKey);
+      }
+    },
+  );
+  return request;
 }
 
 /**
@@ -250,6 +295,8 @@ export async function batchGetCloudConversations(
 
 /** Test-only reset for the module-level conversation detail cache. */
 export function __resetCloudConversationDetailCacheForTests(): void {
+  cloudConversationSearchCache.clear();
+  cloudConversationSearchInFlight.clear();
   cloudConversationDetailCache.clear();
   cloudConversationDetailInFlight.clear();
 }

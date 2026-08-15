@@ -15,6 +15,35 @@ import type {
   EventSearchPage,
 } from "./event-service.types";
 
+const CLOUD_EVENT_SEARCH_CACHE_TTL_MS = 10_000;
+
+type CloudEventSearchResult = EventSearchPage<OpenHandsEvent>;
+
+const cloudEventSearchCache = new Map<
+  string,
+  { value: CloudEventSearchResult; expiresAt: number }
+>();
+const cloudEventSearchInFlight = new Map<
+  string,
+  Promise<CloudEventSearchResult>
+>();
+
+export const __resetEventSearchCacheForTests = (): void => {
+  cloudEventSearchCache.clear();
+  cloudEventSearchInFlight.clear();
+};
+
+function cloudEventSearchKey(
+  backendId: string,
+  orgId: string | null | undefined,
+  conversationId: string,
+  params: URLSearchParams,
+): string {
+  return [backendId, orgId ?? "", conversationId, params.toString()].join(
+    "\\u0000",
+  );
+}
+
 /**
  * Cloud-mode REST calls are split between two upstream hosts (matching
  * OpenHands' cloud frontend):
@@ -133,34 +162,76 @@ class EventService {
         params.set("timestamp__gte", options.timestampGte);
       if (options.timestampLt) params.set("timestamp__lt", options.timestampLt);
 
-      const doCloudSearch = (searchParams: URLSearchParams) =>
-        callCloudProxy<EventSearchPage<OpenHandsEvent>>({
-          backend: active,
-          method: "GET",
-          path: `/api/v1/conversation/${conversationId}/events/search?${searchParams.toString()}`,
-        });
-
-      try {
-        const data = await doCloudSearch(params);
-        return {
-          items: data?.items ?? [],
-          next_page_id: data?.next_page_id ?? null,
-        };
-      } catch (err) {
-        if (!hasFilterParams) throw err;
-        if (options.strictPagination) throw err;
-
-        // Server doesn't support timestamp filters yet — stop pagination
-        // by returning an empty page so the UI doesn't retry indefinitely.
-        // A limit-only fallback would return the same most-recent events
-        // already in the store, which get deduped but keep hasMore=true.
-        console.warn(
-          "[EventService] Cloud backend doesn't support pagination filters. " +
-            "Falling back to initial load only. " +
-            "Server needs OpenHands/OpenHands#14399.",
-        );
-        return { items: [], next_page_id: null };
+      const cacheKey = cloudEventSearchKey(
+        active.id,
+        getActiveBackend().orgId,
+        conversationId,
+        params,
+      );
+      const cached = cloudEventSearchCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.value;
       }
+      if (cached) cloudEventSearchCache.delete(cacheKey);
+
+      const existing = cloudEventSearchInFlight.get(cacheKey);
+      if (existing) return existing;
+
+      const request = (async (): Promise<CloudEventSearchResult> => {
+        const doCloudSearch = (searchParams: URLSearchParams) =>
+          callCloudProxy<EventSearchPage<OpenHandsEvent>>({
+            backend: active,
+            method: "GET",
+            path: `/api/v1/conversation/${conversationId}/events/search?${searchParams.toString()}`,
+          });
+
+        try {
+          const data = await doCloudSearch(params);
+          const result = {
+            items: data?.items ?? [],
+            next_page_id: data?.next_page_id ?? null,
+          };
+          cloudEventSearchCache.set(cacheKey, {
+            value: result,
+            expiresAt: Date.now() + CLOUD_EVENT_SEARCH_CACHE_TTL_MS,
+          });
+          return result;
+        } catch (err) {
+          if (!hasFilterParams) throw err;
+          if (options.strictPagination) throw err;
+
+          // Server doesn't support timestamp filters yet — stop pagination
+          // by returning an empty page so the UI doesn't retry indefinitely.
+          // A limit-only fallback would return the same most-recent events
+          // already in the store, which get deduped but keep hasMore=true.
+          console.warn(
+            "[EventService] Cloud backend doesn't support pagination filters. " +
+              "Falling back to initial load only. " +
+              "Server needs OpenHands/OpenHands#14399.",
+          );
+          const result = { items: [], next_page_id: null };
+          cloudEventSearchCache.set(cacheKey, {
+            value: result,
+            expiresAt: Date.now() + CLOUD_EVENT_SEARCH_CACHE_TTL_MS,
+          });
+          return result;
+        }
+      })();
+
+      cloudEventSearchInFlight.set(cacheKey, request);
+      void request.then(
+        () => {
+          if (cloudEventSearchInFlight.get(cacheKey) === request) {
+            cloudEventSearchInFlight.delete(cacheKey);
+          }
+        },
+        () => {
+          if (cloudEventSearchInFlight.get(cacheKey) === request) {
+            cloudEventSearchInFlight.delete(cacheKey);
+          }
+        },
+      );
+      return request;
     }
 
     const page = await new RemoteEventsList(

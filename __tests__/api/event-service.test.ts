@@ -4,7 +4,9 @@ import {
   setActiveSelection,
   setRegisteredBackends,
 } from "#/api/backend-registry/active-store";
-import EventService from "#/api/event-service/event-service.api";
+import EventService, {
+  __resetEventSearchCacheForTests,
+} from "#/api/event-service/event-service.api";
 import { callCloudProxy } from "#/api/cloud/proxy";
 import type { Backend } from "#/api/backend-registry/types";
 
@@ -25,6 +27,7 @@ beforeEach(() => {
   __resetActiveStoreForTests();
   setRegisteredBackends([cloudBackend]);
   setActiveSelection({ backendId: cloudBackend.id, orgId: "org-1" });
+  __resetEventSearchCacheForTests();
   vi.mocked(callCloudProxy).mockReset();
   vi.mocked(callCloudProxy).mockResolvedValue({
     items: [],
@@ -35,10 +38,36 @@ beforeEach(() => {
 afterEach(() => {
   window.localStorage.clear();
   __resetActiveStoreForTests();
+  __resetEventSearchCacheForTests();
   vi.mocked(callCloudProxy).mockReset();
 });
 
 describe("EventService.searchEvents — cloud branch", () => {
+  it("shares an in-flight request for identical event searches", async () => {
+    let resolveRequest: ((value: unknown) => void) | undefined;
+    vi.mocked(callCloudProxy).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRequest = resolve;
+      }) as ReturnType<typeof callCloudProxy>,
+    );
+
+    const first = EventService.searchEvents("conv-1", null, null, {
+      limit: 10,
+      sortOrder: "TIMESTAMP_DESC",
+    });
+    const second = EventService.searchEvents("conv-1", null, null, {
+      limit: 10,
+      sortOrder: "TIMESTAMP_DESC",
+    });
+
+    expect(vi.mocked(callCloudProxy)).toHaveBeenCalledTimes(1);
+    resolveRequest?.({ items: [], next_page_id: null });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { items: [], next_page_id: null },
+      { items: [], next_page_id: null },
+    ]);
+  });
+
   it("forwards all pagination params to the cloud proxy and clamps limit to <=100", async () => {
     const options = {
       limit: 500,
@@ -97,9 +126,7 @@ describe("EventService.searchEvents — cloud branch", () => {
   });
 
   it("rethrows when a limit-only request (no filter params) fails", async () => {
-    vi.mocked(callCloudProxy).mockRejectedValueOnce(
-      new Error("Network error"),
-    );
+    vi.mocked(callCloudProxy).mockRejectedValueOnce(new Error("Network error"));
 
     await expect(
       EventService.searchEvents("conv-1", null, null, { limit: 50 }),
