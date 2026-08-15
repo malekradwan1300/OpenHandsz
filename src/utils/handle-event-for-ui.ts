@@ -337,11 +337,25 @@ const getFinalAgentText = (event: OpenHandsEvent): string | null => {
 const normalizeFinalAgentText = (text: string): string =>
   text.replace(/\s+/g, " ").trim();
 
+const DUPLICATE_FINAL_AGENT_WINDOW_MS = 30_000;
+
+const getEventTimestampMs = (event: OpenHandsEvent): number | null => {
+  const timestamp = event.timestamp;
+  if (typeof timestamp !== "string" || !timestamp.trim()) return null;
+
+  const numericTimestamp = Number(timestamp);
+  if (Number.isFinite(numericTimestamp)) return numericTimestamp;
+
+  const parsedTimestamp = Date.parse(timestamp);
+  return Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
+};
+
 /**
  * REST and WebSocket can deliver the same completed assistant turn with
  * different event ids. Exact-id de-duplication cannot catch that overlap.
- * Only compare final assistant events after the latest user message, so two
- * intentionally identical replies in separate turns remain visible.
+ * Prefer a timestamp window so a duplicated user echo cannot hide the first
+ * assistant event behind a newer "last user" boundary. When timestamps are
+ * unavailable, retain the original same-turn fallback.
  */
 const hasEquivalentFinalAgentMessage = (
   event: OpenHandsEvent,
@@ -353,13 +367,28 @@ const hasEquivalentFinalAgentMessage = (
   const lastUserMessageIndex = findLastUserMessageIndex(uiEvents);
   const normalizedIncoming = normalizeFinalAgentText(incomingText);
   if (!normalizedIncoming) return false;
+  const incomingTimestamp = getEventTimestampMs(event);
 
-  return uiEvents.slice(lastUserMessageIndex + 1).some((existingEvent) => {
+  return uiEvents.some((existingEvent, index) => {
     const existingText = getFinalAgentText(existingEvent);
-    return (
-      existingText !== null &&
-      normalizeFinalAgentText(existingText) === normalizedIncoming
-    );
+    if (
+      existingText === null ||
+      normalizeFinalAgentText(existingText) !== normalizedIncoming
+    ) {
+      return false;
+    }
+
+    const existingTimestamp = getEventTimestampMs(existingEvent);
+    if (
+      incomingTimestamp !== null &&
+      existingTimestamp !== null &&
+      Math.abs(incomingTimestamp - existingTimestamp) <=
+        DUPLICATE_FINAL_AGENT_WINDOW_MS
+    ) {
+      return true;
+    }
+
+    return index > lastUserMessageIndex;
   });
 };
 

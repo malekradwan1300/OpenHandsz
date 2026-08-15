@@ -372,6 +372,57 @@ describe("handleEventForUI", () => {
       expect(result.at(-1)).toBe(mockAgentMessageEvent);
     });
 
+    it("drops an equivalent final agent message after a duplicated user echo", () => {
+      const duplicateUser: MessageEvent = {
+        ...mockMessageEvent,
+        id: "duplicate-user-event",
+        timestamp: String(Number(mockMessageEvent.timestamp) + 1_000),
+      };
+      const duplicateAgent: MessageEvent = {
+        ...mockAgentMessageEvent,
+        id: "duplicate-agent-event",
+        timestamp: String(Number(mockAgentMessageEvent.timestamp) + 1_000),
+      };
+
+      const result = handleEventForUI(duplicateAgent, [
+        mockMessageEvent,
+        mockAgentMessageEvent,
+        duplicateUser,
+      ]);
+
+      expect(result).toEqual([
+        mockMessageEvent,
+        mockAgentMessageEvent,
+        duplicateUser,
+      ]);
+    });
+
+    it("keeps identical text when it belongs to a later turn", () => {
+      const laterUser: MessageEvent = {
+        ...mockMessageEvent,
+        id: "later-user-event",
+        timestamp: String(Number(mockMessageEvent.timestamp) + 60_000),
+      };
+      const laterAgent: MessageEvent = {
+        ...mockAgentMessageEvent,
+        id: "later-agent-event",
+        timestamp: String(Number(mockAgentMessageEvent.timestamp) + 60_000),
+      };
+
+      const result = handleEventForUI(laterAgent, [
+        mockMessageEvent,
+        mockAgentMessageEvent,
+        laterUser,
+      ]);
+
+      expect(result).toEqual([
+        mockMessageEvent,
+        mockAgentMessageEvent,
+        laterUser,
+        laterAgent,
+      ]);
+    });
+
     it("replaces aggregated streamed content with the canonical final message", () => {
       const first = makeStreamingDelta(
         "delta-1",

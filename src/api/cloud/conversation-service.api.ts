@@ -163,20 +163,95 @@ export async function searchCloudConversations(
 /**
  * Batch-fetch cloud app-conversations by id. Mirrors the local
  * `AgentServerConversationService.batchGetAppConversations` interface.
+ *
+ * Several conversation-page consumers need the same metadata at startup
+ * (active conversation, runtime bootstrap, git changes, and action mutations).
+ * React Query only deduplicates calls that share one query observer; these
+ * service-level callers bypass React Query and otherwise produce repeated
+ * `app-conversations?ids=...` requests. Keep a short cache plus an in-flight
+ * promise map so all consumers share one Cloud response without making the
+ * metadata stale for longer than the existing 30-second polling window.
  */
+const CLOUD_CONVERSATION_DETAIL_CACHE_TTL_MS = 15_000;
+
+type CloudConversationBatch = (AppConversation | null)[];
+
+type CloudConversationCacheEntry = {
+  expiresAt: number;
+  value: CloudConversationBatch;
+};
+
+const cloudConversationDetailCache = new Map<
+  string,
+  CloudConversationCacheEntry
+>();
+const cloudConversationDetailInFlight = new Map<
+  string,
+  Promise<CloudConversationBatch>
+>();
+
+function cloudConversationBatchKey(
+  backend: Backend,
+  orgId: string | null | undefined,
+  ids: string[],
+): string {
+  return `${backend.id}\u0000${orgId ?? ""}\u0000${ids.join("\u0001")}`;
+}
+
+function overlayCloudConversationBatch(
+  conversations: CloudConversationBatch,
+): CloudConversationBatch {
+  return conversations.map(overlayStoredRepoSelection);
+}
+
 export async function batchGetCloudConversations(
   ids: string[],
-): Promise<(AppConversation | null)[]> {
+): Promise<CloudConversationBatch> {
   if (ids.length === 0) return [];
+
+  const active = getActiveBackend();
   const backend = getActiveCloudBackend();
+  const key = cloudConversationBatchKey(backend, active.orgId, ids);
+  const now = Date.now();
+  const cached = cloudConversationDetailCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return overlayCloudConversationBatch(cached.value);
+  }
+
+  const pending = cloudConversationDetailInFlight.get(key);
+  if (pending) {
+    return pending.then(overlayCloudConversationBatch);
+  }
+
   const params = new URLSearchParams();
   for (const id of ids) params.append("ids", id);
-  const data = await callCloudProxy<(AppConversation | null)[]>({
+  const request = callCloudProxy<CloudConversationBatch>({
     backend,
     method: "GET",
     path: `/api/v1/app-conversations?${params.toString()}`,
-  });
-  return (data ?? []).map(overlayStoredRepoSelection);
+  })
+    .then((data) => {
+      const value = data ?? [];
+      cloudConversationDetailCache.set(key, {
+        value,
+        expiresAt: Date.now() + CLOUD_CONVERSATION_DETAIL_CACHE_TTL_MS,
+      });
+      return value;
+    })
+    .finally(() => {
+      if (cloudConversationDetailInFlight.get(key) === request) {
+        cloudConversationDetailInFlight.delete(key);
+      }
+    });
+
+  cloudConversationDetailInFlight.set(key, request);
+  return request.then(overlayCloudConversationBatch);
+}
+
+/** Test-only reset for the module-level conversation detail cache. */
+export function __resetCloudConversationDetailCacheForTests(): void {
+  cloudConversationDetailCache.clear();
+  cloudConversationDetailInFlight.clear();
 }
 
 /**

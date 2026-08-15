@@ -7,6 +7,7 @@ import {
 import type { Backend } from "#/api/backend-registry/types";
 import { setStoredConversationMetadata } from "#/api/conversation-metadata-store";
 import {
+  __resetCloudConversationDetailCacheForTests,
   batchGetCloudConversations,
   createCloudAppConversation,
   pickCloudBackendForLaunch,
@@ -37,12 +38,14 @@ describe("cloud conversation-service overlay", () => {
     setRegisteredBackends([cloudBackend]);
     setActiveSelection({ backendId: cloudBackend.id, orgId: null });
     mockCallCloudProxy.mockReset();
+    __resetCloudConversationDetailCacheForTests();
   });
 
   afterEach(() => {
     window.localStorage.clear();
     __resetActiveStoreForTests();
     mockCallCloudProxy.mockReset();
+    __resetCloudConversationDetailCacheForTests();
     vi.unstubAllGlobals();
   });
 
@@ -174,6 +177,22 @@ describe("cloud conversation-service overlay", () => {
 
     expect(result).toEqual([]);
     expect(mockCallCloudProxy).not.toHaveBeenCalled();
+  });
+
+  it("coalesces concurrent and short-lived repeated detail reads", async () => {
+    const conversation = { id: "conv-1", title: "Hello" };
+    mockCallCloudProxy.mockResolvedValue([conversation]);
+
+    const [first, second] = await Promise.all([
+      batchGetCloudConversations(["conv-1"]),
+      batchGetCloudConversations(["conv-1"]),
+    ]);
+    const third = await batchGetCloudConversations(["conv-1"]);
+
+    expect(first).toEqual([conversation]);
+    expect(second).toEqual([conversation]);
+    expect(third).toEqual([conversation]);
+    expect(mockCallCloudProxy).toHaveBeenCalledTimes(1);
   });
 
   it("only fills server-side nulls — server-populated fields are preserved", async () => {
