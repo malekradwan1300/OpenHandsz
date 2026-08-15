@@ -1,18 +1,19 @@
 import React from "react";
 import { ConversationWebSocketProvider } from "#/contexts/conversation-websocket-context";
-import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+import type { AppConversation } from "#/api/conversation-service/agent-server-conversation-service.types";
 import { useSubConversations } from "#/hooks/query/use-sub-conversations";
 
 interface WebSocketProviderWrapperProps {
   children: React.ReactNode;
   conversationId: string;
+  conversation?: AppConversation | null;
 }
 
 export function WebSocketProviderWrapper({
   children,
   conversationId,
+  conversation,
 }: WebSocketProviderWrapperProps) {
-  const { data: conversation } = useActiveConversation();
   const { data: subConversations } = useSubConversations(
     conversation?.sub_conversation_ids ?? [],
   );

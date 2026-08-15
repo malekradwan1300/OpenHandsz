@@ -11,6 +11,10 @@ type RequestTask<T> = () => Promise<T>;
 
 const nextStartAtByBackend = new Map<string, number>();
 const inFlightGetRequests = new Map<string, Promise<unknown>>();
+const cachedGetResponses = new Map<
+  string,
+  { expiresAt: number; value: unknown }
+>();
 
 function schedulerKey(backend: Backend): string {
   // The backend id is a locally stable identity for a Cloud configuration. Do
@@ -49,6 +53,8 @@ export function scheduleCloudRequest<T>(
     method: string;
     path: string;
     dedupeKey?: string;
+    /** Cache successful GET responses for this many milliseconds. */
+    cacheTtlMs?: number;
   },
   task: RequestTask<T>,
 ): Promise<T> {
@@ -60,21 +66,33 @@ export function scheduleCloudRequest<T>(
   if (key) {
     const existing = inFlightGetRequests.get(key);
     if (existing) return existing as Promise<T>;
+
+    const cached = cachedGetResponses.get(key);
+    if (cached) {
+      if (cached.expiresAt > Date.now()) {
+        return Promise.resolve(cached.value as T);
+      }
+      cachedGetResponses.delete(key);
+    }
   }
 
   const request = runAtNextCloudSlot(backend, task);
   if (key) {
     inFlightGetRequests.set(key, request);
     void request.then(
-      () => {
-        if (inFlightGetRequests.get(key) === request) {
-          inFlightGetRequests.delete(key);
+      (value) => {
+        inFlightGetRequests.delete(key);
+        if (options.cacheTtlMs && options.cacheTtlMs > 0) {
+          cachedGetResponses.set(key, {
+            value,
+            expiresAt: Date.now() + options.cacheTtlMs,
+          });
         }
       },
       () => {
-        if (inFlightGetRequests.get(key) === request) {
-          inFlightGetRequests.delete(key);
-        }
+        inFlightGetRequests.delete(key);
+        // Failed requests are deliberately never cached.
+        cachedGetResponses.delete(key);
       },
     );
   }
@@ -86,4 +104,5 @@ export function scheduleCloudRequest<T>(
 export function __resetCloudRequestSchedulerForTests(): void {
   nextStartAtByBackend.clear();
   inFlightGetRequests.clear();
+  cachedGetResponses.clear();
 }

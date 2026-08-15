@@ -205,7 +205,10 @@ function AppContent() {
   );
 
   return (
-    <WebSocketProviderWrapper conversationId={conversationId}>
+    <WebSocketProviderWrapper
+      conversationId={conversationId}
+      conversation={conversation}
+    >
       {content}
     </WebSocketProviderWrapper>
   );
