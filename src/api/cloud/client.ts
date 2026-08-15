@@ -30,7 +30,10 @@ function activeOrgForBackend(backend: Backend): string | null {
   return active.backend.id === backend.id ? active.orgId : null;
 }
 
-export function createCloudClient(backend?: Backend): CloudClient {
+export function createCloudClient(
+  backend?: Backend,
+  proxyPath = "/api/cloud-proxy",
+): CloudClient {
   const target = requireCloudBackend(backend);
   const proxyBaseUrl = getAgentServerBaseUrl();
   const proxyHeaders = proxyBaseUrl ? getAgentServerHeaders() : {};
@@ -48,10 +51,17 @@ export function createCloudClient(backend?: Backend): CloudClient {
           proxy: {
             host: proxyBaseUrl,
             headers: proxyHeaders,
+            path: proxyPath,
           },
         }
       : {}),
   });
+}
+
+export function createCloudConversationAggregatorClient(
+  backend?: Backend,
+): CloudClient {
+  return createCloudClient(backend, "/api/cloud-conversations");
 }
 
 export function createCloudClientForRuntime(backend?: Backend): CloudClient {

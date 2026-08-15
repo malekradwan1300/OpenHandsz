@@ -3,6 +3,7 @@ import {
   getRegisteredBackends,
 } from "../backend-registry/active-store";
 import type { Backend } from "../backend-registry/types";
+import { createCloudConversationAggregatorClient } from "./client";
 import { getStoredConversationMetadata } from "../conversation-metadata-store";
 import type {
   AppConversation,
@@ -84,24 +85,72 @@ export function pickCloudBackendForLaunch(): Backend | null {
  * `AgentServerConversationService.searchConversations` interface but calls
  * the cloud endpoint `/api/v1/app-conversations/search`.
  */
+interface CloudConversationAggregateResponse {
+  items?: AppConversation[];
+  next_page_id?: string | null;
+}
+
+function getHttpStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return null;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : null;
+}
+
+async function searchCloudConversationsThroughWorker(
+  backend: Backend,
+  limit: number,
+  pageId?: string,
+): Promise<CloudConversationAggregateResponse | null> {
+  if (backend.authMode === "cookie") return null;
+
+  try {
+    const client = createCloudConversationAggregatorClient(backend);
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    params.set("sort_order", "UPDATED_AT_DESC");
+    if (pageId) params.set("page_id", pageId);
+
+    return await client.request<CloudConversationAggregateResponse>({
+      hostOverride: backend.host,
+      method: "GET",
+      path: `/api/v1/app-conversations/search?${params.toString()}`,
+    });
+  } catch (error) {
+    // A local/dev build may not have the Worker running yet. Keep the
+    // existing direct Cloud path as a safe compatibility fallback.
+    const status = getHttpStatus(error);
+    if (status === null || [404, 405].includes(status)) return null;
+    throw new Error(`Cloud conversation aggregation failed (${status}).`, {
+      cause: error,
+    });
+  }
+}
+
 export async function searchCloudConversations(
   limit: number = 20,
   pageId?: string,
 ): Promise<AppConversationPage> {
   const backend = getActiveCloudBackend();
-  const params = new URLSearchParams();
-  params.set("limit", String(limit));
-  if (pageId) params.set("page_id", pageId);
-  params.set("sort_order", "UPDATED_AT_DESC");
-
-  const data = await callCloudProxy<{
-    items: AppConversation[];
-    next_page_id: string | null;
-  }>({
+  const aggregated = await searchCloudConversationsThroughWorker(
     backend,
-    method: "GET",
-    path: `/api/v1/app-conversations/search?${params.toString()}`,
-  });
+    limit,
+    pageId,
+  );
+  const data =
+    aggregated ??
+    (await (async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      if (pageId) params.set("page_id", pageId);
+      params.set("sort_order", "UPDATED_AT_DESC");
+      return callCloudProxy<CloudConversationAggregateResponse>({
+        backend,
+        method: "GET",
+        path: `/api/v1/app-conversations/search?${params.toString()}`,
+      });
+    })());
 
   return {
     items: (data?.items ?? []).map(

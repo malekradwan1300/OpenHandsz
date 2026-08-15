@@ -43,6 +43,7 @@ describe("cloud conversation-service overlay", () => {
     window.localStorage.clear();
     __resetActiveStoreForTests();
     mockCallCloudProxy.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it("marks Cloud conversation starts as originating from Agent Canvas", async () => {
@@ -279,6 +280,32 @@ describe("cloud conversation-service overlay", () => {
     expect(conversations[2]?.selected_repository).toBeNull();
     expect(conversations[2]?.selected_branch).toBeNull();
     expect(conversations[2]?.git_provider).toBeNull();
+  });
+
+  it("uses the same-origin aggregate endpoint for cloud conversation search", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [{ id: "conv-1" }, { id: "conv-2" }],
+          next_page_id: "cursor-3",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await searchCloudConversations(20);
+
+    expect(page.items.map(({ id }) => id)).toEqual(["conv-1", "conv-2"]);
+    expect(page.next_page_id).toBe("cursor-3");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/cloud-conversations"),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"host":"https://app.all-hands.dev"'),
+      }),
+    );
+    expect(mockCallCloudProxy).not.toHaveBeenCalled();
   });
 
   it("overlays repo selection on each item returned from searchCloudConversations", async () => {
