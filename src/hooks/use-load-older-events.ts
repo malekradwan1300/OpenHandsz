@@ -137,19 +137,26 @@ export const useLoadOlderEvents = (
 
       isLoadingRef.current = true;
       setIsLoading(true);
+      const bufferedOlderEvents: OpenHandsEvent[] = [];
 
       try {
         while (
           hasMoreRef.current &&
-          countConversationMessages(useEventStore.getState().uiEvents) <
-            desiredMessageCount
+          countConversationMessages([
+            ...useEventStore.getState().uiEvents,
+            ...bufferedOlderEvents,
+          ]) < desiredMessageCount
         ) {
           const { events } = useEventStore.getState();
           const oldest = events[0];
 
           // No anchor yet — defer until the initial REST load has populated the
           // store (avoids fetching twice with the same `TIMESTAMP_DESC` window).
-          if (!oldest) return;
+          if (!oldest) {
+            // REST has not seeded the store yet. Keep pagination available and
+            // let the next history update provide the anchor.
+            break;
+          }
 
           const oldestTimestamp = getEventTimestamp(oldest);
           if (!oldestTimestamp) {
@@ -191,14 +198,10 @@ export const useLoadOlderEvents = (
 
           const older = compactRestHistoryEvents([...page.items].reverse());
           if (older.length > 0) {
-            addEvents(older);
-            // The initial preload only seeds switches from the tail page; a switch
-            // in an older page is hidden as a card but never seeded — silently lost.
-            // Reseed over the merged `uiEvents` (idempotent) so it still surfaces.
-            seedModelSwitchesFromHistory(
-              conversationId,
-              useEventStore.getState().uiEvents,
-            );
+            // Keep pagination network-bound but commit the complete logical batch
+            // in one store update. This prevents one React/Zustand render per
+            // page while the background collector assembles the visible window.
+            bufferedOlderEvents.push(...older);
           }
           // A cursor is authoritative when supplied. Without a cursor, a short
           // page is the compatibility signal that timestamp pagination is done.
@@ -210,6 +213,17 @@ export const useLoadOlderEvents = (
             hasMoreRef.current = false;
             setHasMore(false);
           }
+        }
+
+        if (bufferedOlderEvents.length > 0) {
+          addEvents(bufferedOlderEvents);
+          // The initial preload only seeds switches from the tail page; a switch
+          // in an older page is hidden as a card but never seeded — silently lost.
+          // Reseed once over the merged `uiEvents` so it still surfaces.
+          seedModelSwitchesFromHistory(
+            conversationId,
+            useEventStore.getState().uiEvents,
+          );
         }
       } finally {
         isLoadingRef.current = false;

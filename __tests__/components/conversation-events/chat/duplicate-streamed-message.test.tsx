@@ -189,6 +189,67 @@ describe("issue #1534 — streamed intermediate message duplication", () => {
     ).toHaveTextContent("Considering the request before acting.");
   });
 
+  it("deduplicates REST and WebSocket final messages with different ids", () => {
+    const firstFinalMessage: MessageEvent = {
+      id: "agent-rest-1",
+      timestamp: "2026-06-12T12:00:04Z",
+      source: "agent",
+      llm_message: {
+        role: "assistant",
+        content: [{ type: "text", text: "The task is complete." }],
+      },
+      activated_microagents: [],
+      extended_content: [],
+    };
+    const replayedFinalMessage: MessageEvent = {
+      ...firstFinalMessage,
+      id: "agent-ws-1",
+      timestamp: "2026-06-12T12:00:05Z",
+    };
+
+    const uiEvents = reduce([
+      userMessage,
+      firstFinalMessage,
+      replayedFinalMessage,
+    ]);
+
+    expect(uiEvents).toHaveLength(2);
+    expect(uiEvents.at(-1)).toBe(firstFinalMessage);
+  });
+
+  it("keeps identical replies from separate user turns", () => {
+    const firstFinalMessage: MessageEvent = {
+      id: "agent-turn-1",
+      timestamp: "2026-06-12T12:00:04Z",
+      source: "agent",
+      llm_message: {
+        role: "assistant",
+        content: [{ type: "text", text: "The task is complete." }],
+      },
+      activated_microagents: [],
+      extended_content: [],
+    };
+    const secondUserMessage: MessageEvent = {
+      ...userMessage,
+      id: "user-2",
+      timestamp: "2026-06-12T12:00:06Z",
+    };
+    const secondFinalMessage: MessageEvent = {
+      ...firstFinalMessage,
+      id: "agent-turn-2",
+      timestamp: "2026-06-12T12:00:07Z",
+    };
+
+    expect(
+      reduce([
+        userMessage,
+        firstFinalMessage,
+        secondUserMessage,
+        secondFinalMessage,
+      ]),
+    ).toHaveLength(4);
+  });
+
   it("renders once when streamed text has leading whitespace", () => {
     const leadingWhitespaceDelta: StreamingDeltaEvent = {
       ...streamingDelta,

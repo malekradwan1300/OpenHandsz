@@ -322,6 +322,47 @@ const eventRendersReasoning = (event: OpenHandsEvent): boolean => {
   return false;
 };
 
+const getFinalAgentText = (event: OpenHandsEvent): string | null => {
+  if (isActionEvent(event) && event.action.kind === "FinishAction") {
+    return event.action.message;
+  }
+
+  if (isMessageEvent(event) && event.source === "agent") {
+    return splitInlineThink(joinTextBlocks(event.llm_message.content)).message;
+  }
+
+  return null;
+};
+
+const normalizeFinalAgentText = (text: string): string =>
+  text.replace(/\s+/g, " ").trim();
+
+/**
+ * REST and WebSocket can deliver the same completed assistant turn with
+ * different event ids. Exact-id de-duplication cannot catch that overlap.
+ * Only compare final assistant events after the latest user message, so two
+ * intentionally identical replies in separate turns remain visible.
+ */
+const hasEquivalentFinalAgentMessage = (
+  event: OpenHandsEvent,
+  uiEvents: OpenHandsEvent[],
+): boolean => {
+  const incomingText = getFinalAgentText(event);
+  if (!incomingText) return false;
+
+  const lastUserMessageIndex = findLastUserMessageIndex(uiEvents);
+  const normalizedIncoming = normalizeFinalAgentText(incomingText);
+  if (!normalizedIncoming) return false;
+
+  return uiEvents.slice(lastUserMessageIndex + 1).some((existingEvent) => {
+    const existingText = getFinalAgentText(existingEvent);
+    return (
+      existingText !== null &&
+      normalizeFinalAgentText(existingText) === normalizedIncoming
+    );
+  });
+};
+
 // The final MessageEvent/FinishAction is authoritative for the turn's text. Drop
 // the provisional streamed deltas and render the canonical final event instead,
 // so the message is rendered exactly once (never holey or duplicated) and its
@@ -470,6 +511,10 @@ export const handleEventForUI = (
     (isActionEvent(event) && event.action.kind === "FinishAction") ||
     (isMessageEvent(event) && event.source === "agent")
   ) {
+    if (hasEquivalentFinalAgentMessage(event, newUiEvents)) {
+      return newUiEvents;
+    }
+
     const finalizedUiEvents = finalizeStreamingDeltasInPlace(
       event,
       newUiEvents,
