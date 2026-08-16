@@ -45,11 +45,17 @@ function cloudProfilesTarget(): { backend: Backend; base: string } {
 
 export async function fetchCloudProfiles(): Promise<ProfileListResponse> {
   const { backend, base } = cloudProfilesTarget();
-  return callCloudProxy<ProfileListResponse>({
+  const raw = await callCloudProxy<
+    Partial<ProfileListResponse> | null | undefined
+  >({
     backend,
     method: "GET",
     path: base,
   });
+  return {
+    profiles: raw?.profiles ?? [],
+    active_profile: raw?.active_profile ?? null,
+  };
 }
 
 export async function fetchCloudProfile(

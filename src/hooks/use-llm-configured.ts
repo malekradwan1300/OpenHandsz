@@ -81,10 +81,9 @@ export function useLlmConfigured(): LlmConfiguredResult {
     )
       ? activeAgentProfile.llm_profile_ref
       : undefined;
+  const profilesList = profilesData?.profiles ?? [];
   const referencedProfile = referencedLlmProfileName
-    ? profilesData?.profiles.find(
-        (profile) => profile.name === referencedLlmProfileName,
-      )
+    ? profilesList.find((profile) => profile.name === referencedLlmProfileName)
     : undefined;
   // Fall back to the active LLM profile when the ref is absent (list loading,
   // or an agent profile without a ref) OR stale (names a profile that no longer
@@ -96,7 +95,7 @@ export function useLlmConfigured(): LlmConfiguredResult {
   // conversation (VascoSch92 review, #1571).
   const activeProfile =
     referencedProfile ??
-    profilesData?.profiles.find(
+    profilesList.find(
       (profile) => profile.name === profilesData?.active_profile,
     );
   const hasActiveProfileApiKey = activeProfile?.api_key_set === true;
